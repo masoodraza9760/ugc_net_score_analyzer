@@ -1,55 +1,87 @@
 import streamlit as st
-import PyPDF2
+import pytesseract
+import pdf2image
+from PyPDF2 import PdfReader
 import re
+from PIL import Image
+import tempfile
 
-st.title("Exam Score Analyzer (CUET / UGC NET / Any Exam)")
+# Optional: set this if tesseract is not in PATH
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# --- PDF Text Extractor ---
-def extract_text_from_pdf(uploaded_file):
-    reader = PyPDF2.PdfReader(uploaded_file)
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+st.set_page_config(page_title="Exam Score Analyzer", layout="centered")
+st.title("📊 Multi-Exam Score Analyzer (UGC NET / CUET UG)")
 
-# --- General Response Parser ---
-def parse_response_sheet(text, qid_label="Question ID", opt_label="Chosen Option"):
-    pattern = fr"{qid_label}\s*[:\-]?\s*(\d+).*?{opt_label}\s*[:\-]?\s*([1-9])"
+st.markdown("""
+Upload your **Response Sheet PDF** and **Answer Key PDF**  
+✅ Supports UGC NET & CUET UG  
+✅ Works with text & image-based answer keys  
+""")
+
+response_pdf = st.file_uploader("Upload Response Sheet PDF", type="pdf")
+answer_pdf = st.file_uploader("Upload Answer Key PDF (text or scanned)", type="pdf")
+
+# === Utilities ===
+
+def extract_text_from_pdf(pdf_file):
+    """Extract raw text from selectable text PDF."""
+    try:
+        reader = PdfReader(pdf_file)
+        return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+    except:
+        return ""
+
+def extract_text_from_image_pdf(pdf_file):
+    """OCR fallback for image-based PDFs."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(pdf_file.read())
+        tmp_path = tmp.name
+
+    images = pdf2image.convert_from_path(tmp_path, dpi=300)
+    text = ""
+    for img in images:
+        text += pytesseract.image_to_string(img)
+    return text
+
+def parse_response_sheet(text):
+    """
+    Parses response sheet and returns {QuestionID: ChosenOption}.
+    Handles variable-length Question IDs.
+    """
+    pattern = r"Question ID\s*:\s*(\d+).*?Chosen Option\s*:\s*(\d)"
     return {qid: opt for qid, opt in re.findall(pattern, text, re.DOTALL)}
 
-# --- General Answer Key Parser ---
-def parse_answer_key(text, key_label="Key", allow_dropped=True):
-    pattern1 = r"(\d+)[^\d\n]+([1234D])" if allow_dropped else r"(\d+)[^\d\n]+([1234])"
-    pattern2 = r"Question ID\s*[:\-]?\s*(\d+).*?" + key_label + r"\s*[:\-]?\s*([1234D])"
-    
-    matches = re.findall(pattern1, text)
-    matches += re.findall(pattern2, text, re.DOTALL)
-
+def parse_answer_key(text):
+    """
+    Parses answer key (CUET/UGC). Supports multiple correct options like '1,4'.
+    Handles variable-length Question IDs.
+    """
+    pattern = r"(\d+)\s+([1234](?:,[1234])?)"
     answer_dict = {}
-    for qid, opt in matches:
-        if not allow_dropped and opt == 'D':
-            continue
-        if opt in ['1', '2', '3', '4']:
-            answer_dict[qid] = opt
+    for qid, key in re.findall(pattern, text):
+        options = [opt.strip() for opt in key.split(',')]
+        answer_dict[qid] = options
     return answer_dict
 
-# --- Score Calculator ---
-def calculate_score(response_dict, answer_dict, marks_per_correct=2, marks_per_wrong=0):
-    correct = incorrect = dropped = unattempted = 0
+def calculate_score(response, answer_key):
+    correct = incorrect = dropped = 0
+    total = len(answer_key)
 
-    for qid, correct_opt in answer_dict.items():
-        chosen_opt = response_dict.get(qid)
-
-        if correct_opt == 'D':
+    for qid, correct_opts in answer_key.items():
+        chosen = response.get(qid)
+        if correct_opts == ["DROPPED"]:
             dropped += 1
-        elif chosen_opt is None:
-            unattempted += 1
-        elif chosen_opt == correct_opt:
+        elif chosen is None:
+            continue
+        elif chosen in correct_opts:
             correct += 1
         else:
             incorrect += 1
 
-    score = correct * marks_per_correct + incorrect * marks_per_wrong
-
+    unattempted = total - (correct + incorrect + dropped)
+    score = correct * 2
     return {
-        "Total Questions": len(answer_dict),
+        "Total Questions": total,
         "Attempted": correct + incorrect,
         "Correct": correct,
         "Incorrect": incorrect,
@@ -58,21 +90,22 @@ def calculate_score(response_dict, answer_dict, marks_per_correct=2, marks_per_w
         "Final Score": score
     }
 
-# --- Upload UI ---
-response_pdf = st.file_uploader("Upload Response Sheet PDF", type="pdf")
-answer_pdf = st.file_uploader("Upload Answer Key PDF", type="pdf")
+# === Main Logic ===
 
-# --- Run Logic ---
 if response_pdf and answer_pdf:
-    response_text = extract_text_from_pdf(response_pdf)
-    answer_text = extract_text_from_pdf(answer_pdf)
+    with st.spinner("Processing response sheet..."):
+        response_text = extract_text_from_pdf(response_pdf)
+        response_data = parse_response_sheet(response_text)
 
-    # Flexible parsing
-    response_data = parse_response_sheet(response_text, qid_label="Question ID", opt_label="Chosen Option")
-    answer_key_data = parse_answer_key(answer_text, key_label="Key", allow_dropped=True)
+    with st.spinner("Processing answer key..."):
+        answer_text = extract_text_from_pdf(answer_pdf)
+        if not answer_text.strip():
+            answer_text = extract_text_from_image_pdf(answer_pdf)
+        answer_data = parse_answer_key(answer_text)
 
-    result = calculate_score(response_data, answer_key_data)
+    with st.spinner("Calculating score..."):
+        result = calculate_score(response_data, answer_data)
 
-    st.success("Score Calculation Complete!")
-    for key, value in result.items():
-        st.write(f"**{key}**: {value}")
+    st.success("✅ Score calculated successfully!")
+    for k, v in result.items():
+        st.write(f"**{k}**: {v}")
