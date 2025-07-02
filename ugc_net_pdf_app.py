@@ -2,41 +2,54 @@ import streamlit as st
 import PyPDF2
 import re
 
-st.title("UGC NET Score Analyzer (PDF Upload)")
+st.title("Exam Score Analyzer (CUET / UGC NET / Any Exam)")
 
-# --- Functions ---
+# --- PDF Text Extractor ---
 def extract_text_from_pdf(uploaded_file):
     reader = PyPDF2.PdfReader(uploaded_file)
-    return "\n".join(page.extract_text() for page in reader.pages)
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
 
-def parse_response_sheet(text):
-    pattern = r"Question ID\s*:\s*(\d+).*?Chosen Option\s*:\s*(\d)"
+# --- General Response Parser ---
+def parse_response_sheet(text, qid_label="Question ID", opt_label="Chosen Option"):
+    pattern = fr"{qid_label}\s*[:\-]?\s*(\d+).*?{opt_label}\s*[:\-]?\s*([1-9])"
     return {qid: opt for qid, opt in re.findall(pattern, text, re.DOTALL)}
 
-def parse_answer_key(text):
-    pattern = r"(\d{10})\s+([1234D])"
-    return {qid: opt for qid, opt in re.findall(pattern, text)}
+# --- General Answer Key Parser ---
+def parse_answer_key(text, key_label="Key", allow_dropped=True):
+    pattern1 = r"(\d+)[^\d\n]+([1234D])" if allow_dropped else r"(\d+)[^\d\n]+([1234])"
+    pattern2 = r"Question ID\s*[:\-]?\s*(\d+).*?" + key_label + r"\s*[:\-]?\s*([1234D])"
+    
+    matches = re.findall(pattern1, text)
+    matches += re.findall(pattern2, text, re.DOTALL)
 
-def calculate_score(response_dict, answer_dict):
-    correct = incorrect = dropped = 0
-    total_questions = len(answer_dict)
-
-    for qid, correct_option in answer_dict.items():
-        chosen = response_dict.get(qid)
-        if correct_option.upper() == 'D':
-            dropped += 1
-        elif chosen is None:
+    answer_dict = {}
+    for qid, opt in matches:
+        if not allow_dropped and opt == 'D':
             continue
-        elif chosen == correct_option:
+        if opt in ['1', '2', '3', '4']:
+            answer_dict[qid] = opt
+    return answer_dict
+
+# --- Score Calculator ---
+def calculate_score(response_dict, answer_dict, marks_per_correct=2, marks_per_wrong=0):
+    correct = incorrect = dropped = unattempted = 0
+
+    for qid, correct_opt in answer_dict.items():
+        chosen_opt = response_dict.get(qid)
+
+        if correct_opt == 'D':
+            dropped += 1
+        elif chosen_opt is None:
+            unattempted += 1
+        elif chosen_opt == correct_opt:
             correct += 1
         else:
             incorrect += 1
 
-    unattempted = total_questions - (correct + incorrect + dropped)
-    score = correct * 2
+    score = correct * marks_per_correct + incorrect * marks_per_wrong
 
     return {
-        "Total Questions": total_questions,
+        "Total Questions": len(answer_dict),
         "Attempted": correct + incorrect,
         "Correct": correct,
         "Incorrect": incorrect,
@@ -54,8 +67,9 @@ if response_pdf and answer_pdf:
     response_text = extract_text_from_pdf(response_pdf)
     answer_text = extract_text_from_pdf(answer_pdf)
 
-    response_data = parse_response_sheet(response_text)
-    answer_key_data = parse_answer_key(answer_text)
+    # Flexible parsing
+    response_data = parse_response_sheet(response_text, qid_label="Question ID", opt_label="Chosen Option")
+    answer_key_data = parse_answer_key(answer_text, key_label="Key", allow_dropped=True)
 
     result = calculate_score(response_data, answer_key_data)
 
